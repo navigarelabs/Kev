@@ -6,6 +6,9 @@ FROM runpod/pytorch:1.5.0-cu1281-torch280-ubuntu2404
 
 WORKDIR /app
 ENV PYTHONUNBUFFERED=1
+ # The base image ships an Ubuntu-installed cryptography (41.x) that pip cannot uninstall; the runpod SDK needs >=50.                                                                
+ # Install the newer one over it first (only this package, so torch etc. are untouched).                                                                                             
+RUN pip install --no-cache-dir --ignore-installed "cryptography>=50.0.2"   
 
 # Keep the image's own CUDA build of torch + triton (reinstalling from PyPI can break the CUDA match),
 # then install what run_kev.py needs plus the RunPod Serverless SDK
