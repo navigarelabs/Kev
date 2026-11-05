@@ -10,7 +10,10 @@ Job output:
     [{"id", "answers", "state_tokens", "seconds"}, ...]       or {"error": "..."} (RunPod marks the job FAILED)
 
 Where the model is read from (first that applies):
-    HF_HOME env var  >  /runpod-volume/hf-cache (network volume attached)  >  /models/hf-cache (baked into the image)
+    KEV_HF_HOME env var  >  /runpod-volume/hf-cache (network volume attached)  >  /models/hf-cache (baked into the image)
+The base image sets its own HF_HOME (/workspace/.cache/huggingface, on the small container disk), so it is overridden.
+When the model is on the volume or baked in, downloads are switched off (HF_HUB_OFFLINE=1): a missing file fails fast
+with a clear error instead of filling the container disk.
 
 Settings (endpoint environment variables): KEV_CHECKPOINT (default jaredpalmer/kev-9b), KEV_DTYPE (bf16 | fp32).
 """
@@ -18,9 +21,18 @@ import os
 import sys
 import time
 
-# HF_HOME must be set before transformers / huggingface_hub are imported (run_kev imports them inside load_kev)
-if "HF_HOME" not in os.environ:
-    os.environ["HF_HOME"] = "/runpod-volume/hf-cache" if os.path.isdir("/runpod-volume") else "/models/hf-cache"
+# HF_HOME must be set before transformers / huggingface_hub are imported (run_kev imports them inside load_kev).
+# Always override the base image's HF_HOME: prefer the network volume, then a model baked into the image.
+if os.environ.get("KEV_HF_HOME"):
+    os.environ["HF_HOME"] = os.environ["KEV_HF_HOME"]
+elif os.path.isdir("/runpod-volume"):
+    os.environ["HF_HOME"] = "/runpod-volume/hf-cache"
+    os.environ["HF_HUB_OFFLINE"] = "1"
+elif os.path.isdir("/models/hf-cache"):
+    os.environ["HF_HOME"] = "/models/hf-cache"
+    os.environ["HF_HUB_OFFLINE"] = "1"
+else:
+    print("WARNING: no network volume and no baked model - Kev will be downloaded to the container disk", file=sys.stderr)
 
 import torch
 import runpod
@@ -32,7 +44,9 @@ DEVICE = "cuda"
 DTYPE = {"bf16": torch.bfloat16, "fp32": torch.float32}[os.environ.get("KEV_DTYPE", "bf16")]
 
 # Cold start: load once per worker, reused by every job this worker handles
-print(f"HF_HOME: {os.environ['HF_HOME']}", file=sys.stderr)
+hub_dir = os.path.join(os.environ.get("HF_HOME", ""), "hub")
+print(f"HF_HOME: {os.environ.get('HF_HOME')} | offline: {os.environ.get('HF_HUB_OFFLINE', '0')} | "
+      f"cached models: {sorted(os.listdir(hub_dir)) if os.path.isdir(hub_dir) else 'NONE - folder missing'}", file=sys.stderr)
 t0 = time.perf_counter()
 tok, lm, head = run_kev.load_kev(CHECKPOINT, DEVICE, DTYPE)
 print(f"Kev loaded in {time.perf_counter() - t0:.0f} s on {torch.cuda.get_device_name(0)}", file=sys.stderr)
